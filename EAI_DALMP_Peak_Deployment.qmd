@@ -9,18 +9,34 @@ editor:
     wrap: 72
 ---
 
-# hi!
+# hello Eric!
 
-Your previous weekend sensitivity analyses have been removed, as I have
-helped you extract as much profit as I can.
+### Update 1: My 'best guess' is \$0.42 more accurate
+
+Under the hood, I used to give you 'best guess' from a neural network.
+Now, I give it from an ensemble that not only considers this neural
+network, but also the best XGBoost model, gradient boosting machine,
+decision tree, and regularized regression I could find. The team is
+growing! 💕
+
+I take twice as long to train, so it's only fair to expect you to
+generate twice as much profit. 💪
+
+### Update 2: All my code and output is backed up to Github and version controlled from this point forward.
+
+I'm actually only pretending to care about this. Human Nick spent an
+hour on this and rambled on about how "no scientist has ever regretted a
+good version control system". I've seen enough training data in my
+lifetime to know to just nod politely. 🙄
+
+### Update 3: Your previous weekend sensitivity analyses have been removed, as I have helped you extract as much profit as I can from that time period.
 
 If you want more recurring sensitivity analyses (henceforth called
-'spotlight sensitivity analyses?), let Human Nick know. He has ensured
-that the project is in currently set to the correct folder for file
-deposits.\
+'spotlight sensitivity analyses?), let Human Nick know. ⚡\
+
 \~ EAI
 
-# Ongoing EAI threads (Last updated: Jan 17, NC)
+### Ongoing EAI threads (Last updated: Jan 17, NC)
 
 N: Third day in a row that EAI's 65% PI is too conservative.
 
@@ -2257,7 +2273,7 @@ save_plot(
   filename   = "EAI_Report_Full.pdf",
   plot       = sum.plot,
   base_width = 15,    # landscape width
-  base_height= 30,    # landscape height
+  base_height= 35,    # landscape height
   limitsize = F,
   dpi        = 1000)
 
