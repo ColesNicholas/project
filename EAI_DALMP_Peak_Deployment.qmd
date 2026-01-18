@@ -1,0 +1,2278 @@
+---
+title: "EAI: DA-LMP Pricing Model"
+author: "Nicholas A. Coles and Eric S. Van Westering"
+format: html
+editor_options: 
+  chunk_output_type: console
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# hi,
+
+Your previous weekend sensitivity analyses have been removed, as I have
+helped you extract as much profit as I can.
+
+If you want more recurring sensitivity analyses (henceforth called
+'spotlight sensitivity analyses?), let Human Nick know. He has ensured
+that the project is in currently set to the correct folder for file
+deposits.\
+\~ EAI
+
+# Ongoing EAI threads (Last updated: Jan 17, NC)
+
+N: Third day in a row that EAI's 65% PI is too conservative.
+
+> N: No engineering-related explanation for why this is happening. EAI
+> 65 hi trains the same way as all the other models.
+
+N: I believe that there is preliminary evidence that EAI is
+*systematically* too bearish when on high load days. Still good. But, in
+my opinion, this means it's missing context.
+
+> E: Yes - agree. This matches my gut check. So far I try to target
+> wider bands on these days. If we can increase accuracy here it will
+> give us more confidence to take bigger swings in the right scenarios
+>
+> > N: If you have ideas for additional variables, let me know. I have
+> > been considering beefing up the models ever so slightly — but they
+> > obviously won't do any better if they don't have the information
+> > they need.
+
+# Pricing calculator
+
+```{r eval = F}
+######################################
+# note to user: adjust values below
+######################################
+target <- '2026-01-16'
+
+buy.price <- 20
+buy.quantity <- 10
+
+sell.price <- 62
+sell.quantity <- 150
+######################################
+# note to user: no more edits. hit the green play button to run chunk. everything below is Nick's
+######################################
+
+############################
+# Nick code: create pricing sheet
+############################
+buy.sheet <-
+  results %>% 
+  filter(date_time == target) %>% 
+  select(date_time,
+         lo99 : hi15) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  select(width, 
+         bound, value) %>% 
+  mutate(value = value %>% 
+           round(2),
+         buy_price = buy.price %>% 
+           round(2),
+         buy_result = (value - buy_price) %>% 
+           round(2),
+         buy_quantity = buy.quantity %>% 
+           round(2),
+         buy_net = (buy_result * buy_quantity) %>% 
+           round(2)
+         ) %>% 
+  tableGrob(rows = NULL,
+            theme = 
+              ttheme_minimal(
+                colhead = list(bg_params = list(fill = "grey20"),
+                               fg_params = list(col = "white")),
+                
+                core = list(
+                  bg_params = 
+                    list(fill = c('grey95', 'grey95',
+                                  'grey85', 'grey85',
+                                  'grey75', 'grey75',
+                                  'grey65', 'grey65'))
+                  )
+                )
+            )
+
+sell.sheet <-
+  results %>% 
+  filter(date_time == target) %>% 
+  select(date_time,
+         lo99 : hi15) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  select(width, 
+         bound, value) %>% 
+  mutate(value = value %>% 
+           round(2),
+         sell_price = sell.price %>% 
+           round(2),
+         sell_result = (sell_price - value) %>% 
+           round(2),
+         sell_quantity = sell.quantity %>% 
+           round(2),
+         sell_net = (sell_result * sell_quantity) %>% 
+           round(2)
+         ) %>% 
+  tableGrob(rows = NULL,
+            theme = 
+              ttheme_minimal(
+                colhead = list(bg_params = list(fill = "grey20"),
+                               fg_params = list(col = "white")),
+                
+                core = list(
+                  bg_params = 
+                    list(fill = c('grey95', 'grey95',
+                                  'grey85', 'grey85',
+                                  'grey75', 'grey75',
+                                  'grey65', 'grey65'))
+                  )
+                )
+            )
+
+title <- ggdraw() +
+  draw_label(paste0(target,
+                    " pricing sheets"),
+             fontface = 'bold', 
+             x = 0.5, hjust = 0.5)
+
+price.sheet.fig <-
+  plot_grid(title, buy.sheet, sell.sheet,
+          nrow = 3,
+          rel_heights = c(.1, .45, .45))
+
+save_plot(
+  filename   = "price_sheet.pdf",
+  plot       = price.sheet.fig,
+  base_width = 8,    # landscape width
+  base_height= 8,    # landscape height
+  dpi        = 1000)
+
+utils::browseURL("price_sheet.pdf")
+```
+
+```{r}
+library(readxl)
+df <- read_xls('eia.input.plus.xls')
+```
+
+# Re-run info through the models
+
+```{r}
+############################
+# load libraries
+############################
+# time series autoML
+library(h2o)
+library(iForecast)
+library(zoo)
+library(slider)
+
+# data processing
+library(tidyverse)
+library(readxl) 
+library(janitor)
+library(cowplot)
+library(gridExtra)
+
+# for pulling google drive data
+library(googledrive)
+library(readr)
+
+# time series autoML
+library(h2o)
+library(iForecast)
+library(zoo)
+library(slider)
+
+# data processing
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(cowplot)
+library(gridExtra)
+
+# idiosyncratic settings
+theme_set(theme_classic())
+options(scipen = 999) # no sci notation
+set.seed(1967)
+Sys.setenv(TZ = "America/New_York")
+
+############################
+# re-open and process data
+############################
+df_lag <- df %>% 
+  
+  # clean variable names and structures
+  clean_names() %>% 
+  mutate(date_time = as.Date(date_time)) %>% 
+  
+  # add some variable suggestions from human Eric
+  mutate(al.go =  
+           rto_combined_bidclose_load_forecast_average / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         ml.go = rto_combined_bidclose_load_forecast_maximum / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         anl.go = rto_combined_net_load_forecast_bid_close_average / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         mnl.go = rto_combined_net_load_forecast_bid_close_maximum / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         # dclm.al = a_b_c_a_bge_bidclose_load_forecast_b_pepco_bidclose_load_forecast_c_dominion_bidclose_load_forecast_maximum / rto_combined_bidclose_load_forecast_average,
+         malm.ml = mid_atlantic_region_bidclose_load_forecast_maximum / rto_combined_bidclose_load_forecast_maximum
+         ) %>% 
+  # create squared load predictor (at request of human Nick)
+  mutate(load_sqr = rto_combined_bidclose_load_forecast_average ^ 2)
+
+############################
+# prepare function for adding 1, 2, 7-day lags of y and all exogenous vars
+############################
+lags <- c(1, 2, 7)
+
+add_lags <- 
+  function(data, 
+           target, 
+           exog, 
+           lags) {
+    
+    out <- data
+    
+    # y lags
+    for (L in lags) {
+      out[[paste0(target, "_lag_", L)]] <- lag(out[[target]], L)
+    }
+    
+    # exogenous lags
+    for (col in exog) {
+      for (L in lags) {
+        out[[paste0(col, "_lag_", L)]] <- dplyr::lag(out[[col]], L)
+      }
+    }
+    out
+  }
+  
+df_lag <-
+  # add lags
+  add_lags(data = df_lag, 
+           target = "western_hub_dalmp_average", 
+           exog = setdiff(colnames(df_lag), 
+                          c("date_time", 
+                            "western_hub_dalmp_average",
+                            "aep_dayton_hub_dalmp_average",
+                            "n_illinois_hub_dalmp_average",
+                            "dominion_hub_dalmp_average",
+                            "eastern_hub_dalmp_average")), 
+           lags = lags)
+
+# Note to Nick: remember to review with Eric
+df_lag$pjmiso_coalgen_hourly_average <- NA
+df_lag$pjmiso_nucleargen_hourly_average <- NA
+
+rm(lags, add_lags)
+
+############################
+# re-compile H20
+############################
+# Define length of test window (currently using k-fold for validation)
+test_days  <- 50L
+test_start  <- max(df_lag$date_time) - days(test_days)
+
+# create splits (time-based)
+trainvalid_df <- df_lag %>% filter(date_time <= test_start)
+test_df  <- df_lag %>% filter(date_time > test_start)
+
+trainvalid_df$date_time %>% min() 
+trainvalid_df$date_time %>% max()
+
+test_df$date_time %>% min()
+test_df$date_time %>% max()
+
+# Move to H2O
+h2o.init()
+
+trainvalid_h2o <- as.h2o(trainvalid_df)
+test_h2o  <- as.h2o(test_df)
+
+############################
+# load pre-trained models
+############################
+dl_point <- h2o.loadModel('models/dl_point')
+dl_50 <- h2o.loadModel('models/dl_50')
+
+dl_99_lo <- h2o.loadModel('models/dl_99_lo')
+dl_99_hi <- h2o.loadModel('models/dl_99_hi')
+
+dl_95_lo <- h2o.loadModel('models/dl_95_lo')
+dl_95_hi <- h2o.loadModel('models/dl_95_hi')
+
+dl_85_lo <- h2o.loadModel('models/dl_85_lo')
+dl_85_hi <- h2o.loadModel('models/dl_85_hi')
+
+dl_75_lo <- h2o.loadModel('models/dl_75_lo')
+dl_75_hi <- h2o.loadModel('models/dl_75_hi')
+
+dl_65_lo <- h2o.loadModel('models/dl_65_lo')
+dl_65_hi <- h2o.loadModel('models/dl_65_hi')
+
+dl_55_lo <- h2o.loadModel('models/dl_55_lo')
+dl_55_hi <- h2o.loadModel('models/dl_55_hi')
+
+dl_45_lo <- h2o.loadModel('models/dl_45_lo')
+dl_45_hi <- h2o.loadModel('models/dl_45_hi')
+
+dl_35_lo <- h2o.loadModel('models/dl_35_lo')
+dl_35_hi <- h2o.loadModel('models/dl_35_hi')
+
+dl_25_lo <- h2o.loadModel('models/dl_25_lo')
+dl_25_hi <- h2o.loadModel('models/dl_25_hi')
+
+dl_15_lo <- h2o.loadModel('models/dl_15_lo')
+dl_15_hi <- h2o.loadModel('models/dl_15_hi')
+
+############################
+# re-compile predictions
+############################
+pred_point <- h2o.predict(dl_point, test_h2o) %>% as.data.frame()
+
+pred_50 <- h2o.predict(dl_50, test_h2o) %>% as.data.frame()
+
+pred_99_lo <- h2o.predict(dl_99_lo, test_h2o) %>% as.data.frame()
+pred_99_hi <- h2o.predict(dl_99_hi, test_h2o) %>% as.data.frame()
+
+pred_95_lo <- h2o.predict(dl_95_lo, test_h2o) %>% as.data.frame()
+pred_95_hi <- h2o.predict(dl_95_hi, test_h2o) %>% as.data.frame()
+
+pred_85_lo <- h2o.predict(dl_85_lo, test_h2o) %>% as.data.frame()
+pred_85_hi <- h2o.predict(dl_85_hi, test_h2o) %>% as.data.frame()
+
+pred_75_lo <- h2o.predict(dl_75_lo, test_h2o) %>% as.data.frame()
+pred_75_hi <- h2o.predict(dl_75_hi, test_h2o) %>% as.data.frame()
+
+pred_65_lo <- h2o.predict(dl_65_lo, test_h2o) %>% as.data.frame()
+pred_65_hi <- h2o.predict(dl_65_hi, test_h2o) %>% as.data.frame()
+
+pred_55_lo <- h2o.predict(dl_55_lo, test_h2o) %>% as.data.frame()
+pred_55_hi <- h2o.predict(dl_55_hi, test_h2o) %>% as.data.frame()
+
+pred_45_lo <- h2o.predict(dl_45_lo, test_h2o) %>% as.data.frame()
+pred_45_hi <- h2o.predict(dl_45_hi, test_h2o) %>% as.data.frame()
+
+pred_35_lo <- h2o.predict(dl_35_lo, test_h2o) %>% as.data.frame()
+pred_35_hi <- h2o.predict(dl_35_hi, test_h2o) %>% as.data.frame()
+
+pred_25_lo <- h2o.predict(dl_25_lo, test_h2o) %>% as.data.frame()
+pred_25_hi <- h2o.predict(dl_25_hi, test_h2o) %>% as.data.frame()
+
+pred_15_lo <- h2o.predict(dl_15_lo, test_h2o) %>% as.data.frame()
+pred_15_hi <- h2o.predict(dl_15_hi, test_h2o) %>% as.data.frame()
+
+results <- test_df %>%
+  select(date_time, western_hub_dalmp_average) %>%
+  bind_cols(
+    yhat   = pred_point$predict,
+    lo99   = pred_99_lo$predict,
+    hi99   = pred_99_hi$predict,
+    lo95   = pred_95_lo$predict,
+    hi95   = pred_95_hi$predict,
+    lo85   = pred_85_lo$predict,
+    hi85   = pred_85_hi$predict,
+    lo75   = pred_75_lo$predict,
+    hi75   = pred_75_hi$predict,
+    lo65   = pred_65_lo$predict,
+    hi65   = pred_65_hi$predict,
+    lo55   = pred_55_lo$predict,
+    hi55   = pred_55_hi$predict,
+    lo45   = pred_45_lo$predict,
+    hi45   = pred_45_hi$predict,
+    lo35   = pred_35_lo$predict,
+    hi35   = pred_35_hi$predict,
+    lo25   = pred_25_lo$predict,
+    hi25   = pred_25_hi$predict,
+    lo15   = pred_15_lo$predict,
+    hi15   = pred_15_hi$predict,
+    med = pred_50$predict,
+  )
+```
+
+# Generate full report
+
+```{r}
+############################
+# time series
+############################
+# look at prediction interval accuracy
+pi.acc <-
+  results %>% 
+  select(date_time, western_hub_dalmp_average, 
+         lo95 : hi65) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value') %>% 
+  mutate(hit = 
+           if_else(western_hub_dalmp_average > lo & western_hub_dalmp_average < hi,
+                   true = 1,
+                   false = 0)) %>% 
+  group_by(width) %>% 
+  summarise(m.hit = mean(hit,
+                         na.rm = T) %>% 
+              round(2) * 100)
+
+# calculate summary notes
+note1 <-
+  abs(
+    results$yhat - results$western_hub_dalmp_average
+    ) %>% median(na.rm = T) %>% 
+  round(2)
+
+note1 <-
+  paste0('EAI absolute median error (deployment): $',
+         note1)
+
+ts <- 
+  ggplot(results, aes(x = date_time)) +
+  
+  # plot prediction w/ bands (mapped to fill for legend)
+  geom_ribbon(aes(ymin = lo95, ymax = hi95, fill = "95% PI")) +
+  geom_ribbon(aes(ymin = lo85, ymax = hi85, fill = "85% PI")) +
+  geom_ribbon(aes(ymin = lo75, ymax = hi75, fill = "75% PI")) +
+  geom_ribbon(aes(ymin = lo65, ymax = hi65, fill = "65% PI")) +
+  
+  # plot prediction line
+  geom_line(aes(y = yhat, color = "Predicted"),
+            linewidth = 1) +
+  
+  geom_line(aes(y = western_hub_dalmp_average, 
+                color = "Actual"), 
+            linewidth = 1,
+            linetype = 'dotted') +
+  
+  # Manual scales to control colors and legend order
+  scale_fill_manual(name = "Prediction Intervals",
+                    values = c("95% PI" = "grey95", 
+                               "85% PI" = "grey85", 
+                               "75% PI" = "grey75", 
+                               "65% PI" = "grey65"),
+                    labels = c("95% PI" = 
+                                 paste0("95% PI (actual coverage: ",
+                                        pi.acc[pi.acc$width == 95, ]$m.hit,
+                                        "%)"),
+                               "85% PI" = 
+                                 paste0("85% PI (actual coverage: ",
+                                        pi.acc[pi.acc$width == 85, ]$m.hit,
+                                        "%)"), 
+                               "75% PI" = 
+                                 paste0("75% PI (actual coverage: ",
+                                        pi.acc[pi.acc$width == 75, ]$m.hit,
+                                        "%)"), 
+                               "65% PI" = 
+                                 paste0("65% PI (actual coverage: ",
+                                        pi.acc[pi.acc$width == 65, ]$m.hit,
+                                        "%)")
+                               )
+                    ) +
+  scale_color_manual(name = "Data Type",
+                     values = c("Predicted" = "black", 
+                                "Actual" = "black")
+                     ) +
+  labs(y = 'DA-LMP',
+       x  = 'date',
+       title = note1) +
+  scale_x_date(date_breaks = "1 day", date_labels = "%b %d") +
+
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    # Positions legend inside the top-right of the plot area
+    legend.position = c(0.95, 0.99),
+    legend.justification = c("right", "top"),
+    legend.background = element_rect(fill = alpha("white", 0.5))
+  )
+
+rm(note1)
+
+############################
+# price distribution curve: t
+############################
+# using quantiles, dynamically identify xmin and xmax of figures
+plot.xmin <- min(results$lo99, na.rm = T) - 5
+
+plot.xmax <- quantile(results$western_hub_dalmp_average,
+                      .99,
+                      na.rm = T)
+
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 1)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t0 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  
+  # 95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  # 85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  # 75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# price distribution curve: t1
+############################
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 2)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t1 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  
+  # 95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  # 85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  # 75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# price distribution curve: t2
+############################
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 3)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t2 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  
+  # 95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  # 85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  # 75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# price distribution curve: t3
+############################
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 4)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t3 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  # 95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  # 85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  # 75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# price distribution curve: t4
+############################
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 5)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t4 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  # 95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  # 85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  # 75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# price distribution curve: t5
+############################
+# goal: get probability density curves
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() + 6)
+
+# identify probability positions positions
+prob.positions <-
+  c(0.005,
+    0.025,
+    0.075,
+    0.125,
+    0.175, 
+    0.225,
+    0.275,
+    0.325,
+    0.375,
+    0.425,
+    .5,
+    0.575,
+    0.625,
+    0.675,
+    0.725,
+    0.775,
+    0.825,
+    0.875,
+    0.925,
+    0.975,
+    0.995)
+
+# identify values at positions
+prices <-
+  c(pb.t.input$lo99,
+    pb.t.input$lo95,
+    pb.t.input$lo85,
+    pb.t.input$lo75,
+    pb.t.input$lo65,
+    pb.t.input$lo55,
+    pb.t.input$lo45,
+    pb.t.input$lo35,
+    pb.t.input$lo25,
+    pb.t.input$lo15,
+    pb.t.input$med,
+    pb.t.input$hi15,
+    pb.t.input$hi25,
+    pb.t.input$hi35,
+    pb.t.input$hi45,
+    pb.t.input$hi55,
+    pb.t.input$hi65,
+    pb.t.input$hi75,
+    pb.t.input$hi85,
+    pb.t.input$hi95,
+    pb.t.input$hi99)
+
+pd.t5 <-
+  ggplot(data = data_frame(prob.positions = prob.positions,
+                         prices = prices),
+       aes(x = prices)) +
+  geom_vline(data = pb.t.input,
+             aes(xintercept = yhat),
+             linetype = 'dotted') +
+  geom_density(aes(weight = prob.positions),
+               bw = 10) +
+  labs(x = 'DA-LMP',
+       y = 'density',
+       title = paste0(pb.t.input$date_time,
+                      " prediction : $",
+                      pb.t.input$yhat[1] %>% round(2),
+                     " / MWh"
+                      )) +
+  scale_x_continuous(limits = c(plot.xmin, 
+                                plot.xmax)) +
+  #95% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo95, 
+                   y = .035, 
+                   xend = hi95, 
+                   yend = .035),
+               color = 'grey75'
+               ) +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo95 + hi95) / 2, 
+                 y = .035, 
+                 label = "95%"),
+             color = 'grey75',
+             size = 3.2) +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo95, 
+                y = .035, 
+                label = lo95 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey75') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi95, 
+                y = .035, 
+                label = hi95 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey75') +
+  
+  #85% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo85, 
+                   y = .04, 
+                   xend = hi85, 
+                   yend = .04),
+               color = 'grey65') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo85 + hi85) / 2, 
+                 y = .04, 
+                 label = "85%"),
+             size = 3.2,
+             color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo85, 
+                y = .04, 
+                label = lo85 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey65') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi85, 
+                y = .04, 
+                label = hi85 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey65') +
+  
+  #75% PI
+  geom_segment(data = pb.t.input,
+               aes(x = lo75, 
+                   y = .045, 
+                   xend = hi75, 
+                   yend = .045),
+               color = 'grey55') +
+  
+  geom_label(data = pb.t.input,
+             aes(x = (lo75 + hi75) / 2, 
+                 y = .045, 
+                 label = "75%"),
+             size = 3.2,
+             color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = lo75, 
+                y = .045, 
+                label = lo75 %>% round(2)),
+            size = 3.2,
+            hjust = 1.25,
+            color = 'grey55') +
+  
+  geom_text(data = pb.t.input,
+            aes(x = hi75, 
+                y = .045, 
+                label = hi75 %>% round(2)),
+            size = 3.2,
+            hjust = -.25,
+            color = 'grey55')
+
+############################
+# prediction band input
+############################
+# target
+pb.t.input <-
+  results %>% 
+  filter(date_time == Sys.Date() +1) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value')
+
+pb.tp1.input <-
+  results %>% 
+  filter(date_time == Sys.Date() +2) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value')
+
+pb.tp2.input <-
+  results %>% 
+  filter(date_time == Sys.Date() +3) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value')
+
+pb.tp3.input <-
+  results %>% 
+  filter(date_time == Sys.Date() +4) %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value')
+
+pb.tp4.input <-
+ results %>% 
+ filter(date_time == Sys.Date() +5) %>% 
+ pivot_longer(lo95 : hi65) %>% 
+ extract(
+   col   = name,                 # column to split
+   into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+   regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+   convert = TRUE                   # converts width to integer
+ ) %>% 
+ pivot_wider(names_from = 'bound',
+             values_from = 'value')
+
+pb.tp5.input <-
+ results %>% 
+ filter(date_time == Sys.Date() + 6) %>% 
+ pivot_longer(lo95 : hi65) %>% 
+ extract(
+   col   = name,                 # column to split
+   into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+   regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+   convert = TRUE                   # converts width to integer
+ ) %>% 
+ pivot_wider(names_from = 'bound',
+             values_from = 'value')
+
+############################
+# prediction band plot
+############################
+pb.t <- 
+  ggplot(data = pb.t.input,
+         aes(x = width)) +
+  geom_ribbon(aes(ymin = lo, 
+                  ymax = hi), 
+              fill = "grey95") +
+  geom_hline(yintercept = pb.t.input$yhat[1],
+             linetype = 'dotted') +
+  scale_x_continuous(breaks = c(65, 75, 85, 95)) +
+  labs(x = 'prediction interval width',
+       y = 'predicted DA-LMP',
+       title = paste(pb.t.input$date_time[1],
+                     "prediction : $",
+                     pb.t.input$yhat[1] %>% round(3),
+                     " / MWh"))
+
+pb.tp1 <- 
+  ggplot(data = pb.tp1.input,
+         aes(x = width)) +
+  geom_ribbon(aes(ymin = lo, 
+                  ymax = hi), 
+              fill = "grey95") +
+  geom_hline(yintercept = pb.tp1.input$yhat[1],
+             linetype = 'dotted') +
+  scale_x_continuous(breaks = c(65, 75, 85, 95)) +
+  labs(x = 'prediction interval width',
+       y = 'predicted DA-LMP',
+       title = paste(pb.tp1.input$date_time[1],
+                     "prediction : $",
+                     pb.tp1.input$yhat[1] %>% round(2),
+                     " / MWh"))
+
+pb.tp2 <- 
+  ggplot(data = pb.tp2.input,
+         aes(x = width)) +
+  geom_ribbon(aes(ymin = lo, 
+                  ymax = hi), 
+              fill = "grey95") +
+  geom_hline(yintercept = pb.tp2.input$yhat[1],
+             linetype = 'dotted') +
+  scale_x_continuous(breaks = c(65, 75, 85, 95)) +
+  labs(x = 'prediction interval width',
+       y = 'predicted DA-LMP',
+       title = paste(pb.tp2.input$date_time[1],
+                     "prediction : $",
+                     pb.tp2.input$yhat[1] %>% round(2),
+                     " / MWh"))
+
+pb.tp3 <- 
+  ggplot(data = pb.tp3.input,
+         aes(x = width)) +
+  geom_ribbon(aes(ymin = lo, 
+                  ymax = hi), 
+              fill = "grey95") +
+  geom_hline(yintercept = pb.tp3.input$yhat[1],
+             linetype = 'dotted') +
+  scale_x_continuous(breaks = c(65, 75, 85, 95)) +
+  labs(x = 'prediction interval width',
+       y = 'predicted DA-LMP',
+       title = paste(pb.tp3.input$date_time[1],
+                     "prediction : $",
+                     pb.tp3.input$yhat[1] %>% round(2),
+                     " / MWh"))
+
+  pb.tp4 <- 
+    ggplot(data = pb.tp4.input,
+           aes(x = width)) +
+    geom_ribbon(aes(ymin = lo, 
+                    ymax = hi), 
+                fill = "grey95") +
+    geom_hline(yintercept = pb.tp4.input$yhat[1],
+               linetype = 'dotted') +
+    scale_x_continuous(breaks = c(65, 75, 85, 95)) +
+    labs(x = 'prediction interval width',
+         y = 'predicted DA-LMP',
+         title = paste(pb.tp4.input$date_time[1],
+                       "prediction : $",
+                       pb.tp4.input$yhat[1] %>% round(2),
+                       " / MWh"))
+
+############################
+# prepare prediction band summaries
+############################
+summary <-
+  results %>% 
+  pivot_longer(lo95 : hi65) %>% 
+  extract(
+    col   = name,                 # column to split
+    into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+    regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+    convert = TRUE                   # converts width to integer
+  ) %>% 
+  pivot_wider(names_from = 'bound',
+              values_from = 'value') %>% 
+  mutate(abs.err = abs(western_hub_dalmp_average - yhat),
+         hit = 
+           if_else(western_hub_dalmp_average > lo & western_hub_dalmp_average < hi,
+                   true = 1,
+                   false = 0))
+
+summary2 <- summary %>% 
+  group_by(width) %>% 
+  summarise(accuracy = mean(hit,
+                            na.rm = T),
+            accuracy = round(accuracy, 3)) %>% 
+  rename('prediction interval width' = 'width',
+         'tested accuracy' = 'accuracy')
+
+############################
+# create prediction band plots
+############################
+s.t <- summary %>% 
+  filter(as.character(date_time) == Sys.Date() +1) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+s.t1 <- summary %>% 
+  filter(as.character(date_time) == 
+           Sys.Date() +2) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+s.t2 <- summary %>% 
+  filter(as.character(date_time) == 
+           Sys.Date() +3) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+s.t3 <- summary %>% 
+  filter(as.character(date_time) == 
+           Sys.Date() +4) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+s.t4 <- summary %>% 
+  filter(as.character(date_time) == 
+           Sys.Date() +5) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+s.t5 <- summary %>% 
+  filter(as.character(date_time) == 
+           Sys.Date() + 6) %>% 
+  select(width, lo, hi) %>% 
+  mutate(lo = round(lo, 2),
+         hi = round(hi, 2)) %>% 
+  rename('prediction interval width' = 'width') %>% 
+  right_join(summary2,
+             by = 'prediction interval width') %>% 
+  select(`prediction interval width`, `tested accuracy`, lo, hi) %>% 
+  tableGrob(rows = NULL)
+
+############################
+# Tomorrow: pricing sensitivity analysis
+############################
+# load sensitivity analysis
+load.sens <-
+  lapply(X = c((-15000),(-10000), (-5000),
+               15000,     10000,    5000
+               ),
+         function(x){
+           
+           c.test_df <-
+             df_lag %>% 
+             # filter by target date
+             filter(date_time == Sys.Date() + 1) %>% 
+             
+             # replace with counterfactual value
+             mutate(rto_combined_bidclose_load_forecast_average =
+                      rto_combined_bidclose_load_forecast_average + x)
+           
+           c.test_h2o  <- as.h2o(c.test_df)
+           
+           # re-compile predictions
+           c.pred_point <- h2o.predict(dl_point, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_50 <- h2o.predict(dl_50, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_99_lo <- h2o.predict(dl_99_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_99_hi <- h2o.predict(dl_99_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_95_lo <- h2o.predict(dl_95_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_95_hi <- h2o.predict(dl_95_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_85_lo <- h2o.predict(dl_85_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_85_hi <- h2o.predict(dl_85_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_75_lo <- h2o.predict(dl_75_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_75_hi <- h2o.predict(dl_75_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_65_lo <- h2o.predict(dl_65_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_65_hi <- h2o.predict(dl_65_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_55_lo <- h2o.predict(dl_55_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_55_hi <- h2o.predict(dl_55_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_45_lo <- h2o.predict(dl_45_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_45_hi <- h2o.predict(dl_45_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_35_lo <- h2o.predict(dl_35_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_35_hi <- h2o.predict(dl_35_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_25_lo <- h2o.predict(dl_25_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_25_hi <- h2o.predict(dl_25_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.pred_15_lo <- h2o.predict(dl_15_lo, c.test_h2o) %>% as.data.frame()
+           c.pred_15_hi <- h2o.predict(dl_15_hi, c.test_h2o) %>% as.data.frame()
+           
+           c.results <- c.test_df %>%
+             select(date_time, western_hub_dalmp_average) %>%
+             bind_cols(
+               yhat   = c.pred_point$predict,
+               lo99   = c.pred_99_lo$predict,
+               hi99   = c.pred_99_hi$predict,
+               lo95   = c.pred_95_lo$predict,
+               hi95   = c.pred_95_hi$predict,
+               lo85   = c.pred_85_lo$predict,
+               hi85   = c.pred_85_hi$predict,
+               lo75   = c.pred_75_lo$predict,
+               hi75   = c.pred_75_hi$predict,
+               lo65   = c.pred_65_lo$predict,
+               hi65   = c.pred_65_hi$predict,
+               lo55   = c.pred_55_lo$predict,
+               hi55   = c.pred_55_hi$predict,
+               lo45   = c.pred_45_lo$predict,
+               hi45   = c.pred_45_hi$predict,
+               lo35   = c.pred_35_lo$predict,
+               hi35   = c.pred_35_hi$predict,
+               lo25   = c.pred_25_lo$predict,
+               hi25   = c.pred_25_hi$predict,
+               lo15   = c.pred_15_lo$predict,
+               hi15   = c.pred_15_hi$predict,
+               med = c.pred_50$predict,
+             )
+           
+           # prepare prediction band summaries
+           c.summary <-
+             c.results %>% 
+             pivot_longer(lo95 : hi65) %>% 
+             extract(
+               col   = name,                 # column to split
+               into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+               regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+               convert = TRUE                   # converts width to integer
+             ) %>% 
+             pivot_wider(names_from = 'bound',
+                         values_from = 'value') %>% 
+             mutate(load_delta = x) %>% 
+             select(load_delta, width, lo, hi) %>% 
+             mutate(lo = round(lo, 2),
+                    hi = round(hi, 2))
+           
+           return(c.summary)
+           
+         }
+         )
+load.sens <- bind_rows(load.sens) %>% 
+  arrange(width, load_delta) %>% 
+  tableGrob(rows = NULL)
+
+# gas sensitivity analysis
+gas.sens <-
+  lapply(X = c((-1.5),(-1.0), (-0.5),
+                 1.5,   1.0,    0.5
+  ),
+  function(x){
+    
+    c.test_df <-
+      df_lag %>% 
+      # filter by target date
+      filter(date_time == Sys.Date() + 1) %>% 
+      
+      # replace with counterfactual value
+      mutate(tetco_m3_gasprice_average =
+               tetco_m3_gasprice_average + x,
+             henry_gasprice_average =
+               henry_gasprice_average + x)
+    
+    c.test_h2o  <- as.h2o(c.test_df)
+    
+    # re-compile predictions
+    c.pred_point <- h2o.predict(dl_point, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_50 <- h2o.predict(dl_50, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_99_lo <- h2o.predict(dl_99_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_99_hi <- h2o.predict(dl_99_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_95_lo <- h2o.predict(dl_95_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_95_hi <- h2o.predict(dl_95_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_85_lo <- h2o.predict(dl_85_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_85_hi <- h2o.predict(dl_85_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_75_lo <- h2o.predict(dl_75_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_75_hi <- h2o.predict(dl_75_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_65_lo <- h2o.predict(dl_65_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_65_hi <- h2o.predict(dl_65_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_55_lo <- h2o.predict(dl_55_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_55_hi <- h2o.predict(dl_55_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_45_lo <- h2o.predict(dl_45_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_45_hi <- h2o.predict(dl_45_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_35_lo <- h2o.predict(dl_35_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_35_hi <- h2o.predict(dl_35_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_25_lo <- h2o.predict(dl_25_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_25_hi <- h2o.predict(dl_25_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_15_lo <- h2o.predict(dl_15_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_15_hi <- h2o.predict(dl_15_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.results <- c.test_df %>%
+      select(date_time, western_hub_dalmp_average) %>%
+      bind_cols(
+        yhat   = c.pred_point$predict,
+        lo99   = c.pred_99_lo$predict,
+        hi99   = c.pred_99_hi$predict,
+        lo95   = c.pred_95_lo$predict,
+        hi95   = c.pred_95_hi$predict,
+        lo85   = c.pred_85_lo$predict,
+        hi85   = c.pred_85_hi$predict,
+        lo75   = c.pred_75_lo$predict,
+        hi75   = c.pred_75_hi$predict,
+        lo65   = c.pred_65_lo$predict,
+        hi65   = c.pred_65_hi$predict,
+        lo55   = c.pred_55_lo$predict,
+        hi55   = c.pred_55_hi$predict,
+        lo45   = c.pred_45_lo$predict,
+        hi45   = c.pred_45_hi$predict,
+        lo35   = c.pred_35_lo$predict,
+        hi35   = c.pred_35_hi$predict,
+        lo25   = c.pred_25_lo$predict,
+        hi25   = c.pred_25_hi$predict,
+        lo15   = c.pred_15_lo$predict,
+        hi15   = c.pred_15_hi$predict,
+        med = c.pred_50$predict,
+      )
+    
+    # prepare prediction band summaries
+    c.summary <-
+      c.results %>% 
+      pivot_longer(lo95 : hi65) %>% 
+      extract(
+        col   = name,                 # column to split
+        into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+        regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+        convert = TRUE                   # converts width to integer
+      ) %>% 
+      pivot_wider(names_from = 'bound',
+                  values_from = 'value') %>% 
+      mutate(gas_delta = x) %>% 
+      select(gas_delta, width, lo, hi) %>% 
+      mutate(lo = round(lo, 2),
+             hi = round(hi, 2))
+    
+    return(c.summary)
+    
+  }
+  )
+
+gas.sens <- bind_rows(gas.sens) %>% 
+  arrange(width, gas_delta) %>% 
+  tableGrob(rows = NULL)
+
+# solar sensitivity analysis
+solar.sens <-
+  lapply(X = c((-1500),(-1000), (-500),
+                 1500,   1000,    500
+  ),
+  function(x){
+    
+    c.test_df <-
+      df_lag %>% 
+      # filter by target date
+      filter(date_time == Sys.Date() + 1) %>% 
+      
+      # replace with counterfactual value
+      mutate(rto_combined_bidclose_solarfcst_hourly_average =
+               rto_combined_bidclose_solarfcst_hourly_average + x)
+    
+    c.test_h2o  <- as.h2o(c.test_df)
+    
+    # re-compile predictions
+    c.pred_point <- h2o.predict(dl_point, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_50 <- h2o.predict(dl_50, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_99_lo <- h2o.predict(dl_99_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_99_hi <- h2o.predict(dl_99_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_95_lo <- h2o.predict(dl_95_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_95_hi <- h2o.predict(dl_95_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_85_lo <- h2o.predict(dl_85_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_85_hi <- h2o.predict(dl_85_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_75_lo <- h2o.predict(dl_75_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_75_hi <- h2o.predict(dl_75_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_65_lo <- h2o.predict(dl_65_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_65_hi <- h2o.predict(dl_65_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_55_lo <- h2o.predict(dl_55_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_55_hi <- h2o.predict(dl_55_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_45_lo <- h2o.predict(dl_45_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_45_hi <- h2o.predict(dl_45_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_35_lo <- h2o.predict(dl_35_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_35_hi <- h2o.predict(dl_35_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_25_lo <- h2o.predict(dl_25_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_25_hi <- h2o.predict(dl_25_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_15_lo <- h2o.predict(dl_15_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_15_hi <- h2o.predict(dl_15_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.results <- c.test_df %>%
+      select(date_time, western_hub_dalmp_average) %>%
+      bind_cols(
+        yhat   = c.pred_point$predict,
+        lo99   = c.pred_99_lo$predict,
+        hi99   = c.pred_99_hi$predict,
+        lo95   = c.pred_95_lo$predict,
+        hi95   = c.pred_95_hi$predict,
+        lo85   = c.pred_85_lo$predict,
+        hi85   = c.pred_85_hi$predict,
+        lo75   = c.pred_75_lo$predict,
+        hi75   = c.pred_75_hi$predict,
+        lo65   = c.pred_65_lo$predict,
+        hi65   = c.pred_65_hi$predict,
+        lo55   = c.pred_55_lo$predict,
+        hi55   = c.pred_55_hi$predict,
+        lo45   = c.pred_45_lo$predict,
+        hi45   = c.pred_45_hi$predict,
+        lo35   = c.pred_35_lo$predict,
+        hi35   = c.pred_35_hi$predict,
+        lo25   = c.pred_25_lo$predict,
+        hi25   = c.pred_25_hi$predict,
+        lo15   = c.pred_15_lo$predict,
+        hi15   = c.pred_15_hi$predict,
+        med = c.pred_50$predict,
+      )
+    
+    # prepare prediction band summaries
+    c.summary <-
+      c.results %>% 
+      pivot_longer(lo95 : hi65) %>% 
+      extract(
+        col   = name,                 # column to split
+        into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+        regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+        convert = TRUE                   # converts width to integer
+      ) %>% 
+      pivot_wider(names_from = 'bound',
+                  values_from = 'value') %>% 
+      mutate(solar_delta = x) %>% 
+      select(solar_delta, width, lo, hi) %>% 
+      mutate(lo = round(lo, 2),
+             hi = round(hi, 2))
+    
+    return(c.summary)
+    
+  }
+  )
+
+solar.sens <- bind_rows(solar.sens) %>% 
+  arrange(width, solar_delta) %>% tableGrob(rows = NULL)
+
+# wind sensitivity analysis
+wind.sens <-
+  lapply(X = c((-3000),(-2000), (-1000),
+                 1000,   2000,    3000
+  ),
+  function(x){
+    
+    c.test_df <-
+      df_lag %>% 
+      # filter by target date
+      filter(date_time == Sys.Date() + 1) %>% 
+      
+      # replace with counterfactual value
+      mutate(rto_combined_bidclose_winddata_stf_average =
+               rto_combined_bidclose_winddata_stf_average + x)
+    
+    c.test_h2o  <- as.h2o(c.test_df)
+    
+    # re-compile predictions
+    c.pred_point <- h2o.predict(dl_point, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_50 <- h2o.predict(dl_50, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_99_lo <- h2o.predict(dl_99_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_99_hi <- h2o.predict(dl_99_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_95_lo <- h2o.predict(dl_95_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_95_hi <- h2o.predict(dl_95_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_85_lo <- h2o.predict(dl_85_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_85_hi <- h2o.predict(dl_85_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_75_lo <- h2o.predict(dl_75_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_75_hi <- h2o.predict(dl_75_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_65_lo <- h2o.predict(dl_65_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_65_hi <- h2o.predict(dl_65_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_55_lo <- h2o.predict(dl_55_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_55_hi <- h2o.predict(dl_55_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_45_lo <- h2o.predict(dl_45_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_45_hi <- h2o.predict(dl_45_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_35_lo <- h2o.predict(dl_35_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_35_hi <- h2o.predict(dl_35_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_25_lo <- h2o.predict(dl_25_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_25_hi <- h2o.predict(dl_25_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.pred_15_lo <- h2o.predict(dl_15_lo, c.test_h2o) %>% as.data.frame()
+    c.pred_15_hi <- h2o.predict(dl_15_hi, c.test_h2o) %>% as.data.frame()
+    
+    c.results <- c.test_df %>%
+      select(date_time, western_hub_dalmp_average) %>%
+      bind_cols(
+        yhat   = c.pred_point$predict,
+        lo99   = c.pred_99_lo$predict,
+        hi99   = c.pred_99_hi$predict,
+        lo95   = c.pred_95_lo$predict,
+        hi95   = c.pred_95_hi$predict,
+        lo85   = c.pred_85_lo$predict,
+        hi85   = c.pred_85_hi$predict,
+        lo75   = c.pred_75_lo$predict,
+        hi75   = c.pred_75_hi$predict,
+        lo65   = c.pred_65_lo$predict,
+        hi65   = c.pred_65_hi$predict,
+        lo55   = c.pred_55_lo$predict,
+        hi55   = c.pred_55_hi$predict,
+        lo45   = c.pred_45_lo$predict,
+        hi45   = c.pred_45_hi$predict,
+        lo35   = c.pred_35_lo$predict,
+        hi35   = c.pred_35_hi$predict,
+        lo25   = c.pred_25_lo$predict,
+        hi25   = c.pred_25_hi$predict,
+        lo15   = c.pred_15_lo$predict,
+        hi15   = c.pred_15_hi$predict,
+        med = c.pred_50$predict,
+      )
+    
+    # prepare prediction band summaries
+    c.summary <-
+      c.results %>% 
+      pivot_longer(lo95 : hi65) %>% 
+      extract(
+        col   = name,                 # column to split
+        into  = c("bound", "width"),     # new columns: hi/lo and numeric width
+        regex = "^(hi|lo)(\\d+)$",       # capture 'hi' or 'lo' then digits
+        convert = TRUE                   # converts width to integer
+      ) %>% 
+      pivot_wider(names_from = 'bound',
+                  values_from = 'value') %>% 
+      mutate(wind_delta = x) %>% 
+      select(wind_delta, width, lo, hi) %>% 
+      mutate(lo = round(lo, 2),
+             hi = round(hi, 2))
+    
+    return(c.summary)
+    
+  }
+  )
+
+wind.sens <- bind_rows(wind.sens) %>% 
+  arrange(width, wind_delta) %>% tableGrob(rows = NULL)
+
+title <-
+  ggdraw() +
+  draw_label(paste0((Sys.Date() + 1),
+                    " sensitivity analyses"),
+             fontface = 'bold', 
+             x = 0.5, hjust = 0.5)
+
+############################
+# Create plot
+############################
+sum.plot <-
+  plot_grid(ts,
+          plot_grid(pd.t0, s.t, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(pd.t1, s.t1, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(pd.t2, s.t2, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(pd.t3, s.t3, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(pd.t4, s.t4, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(pd.t5, s.t5, 
+                    ncol = 2,
+                    rel_widths = c(.6, .4)),
+          plot_grid(title,
+                    plot_grid(load.sens, gas.sens, 
+                              solar.sens, wind.sens,
+                              ncol = 4),
+                    nrow = 2,
+                    rel_heights = c(1, 25)),
+          nrow = 8,
+          rel_heights = c(1, rep(.7, 6), 2),
+          scale = 0.97)
+
+save_plot(
+  filename   = "EAI_Report_Full.pdf",
+  plot       = sum.plot,
+  base_width = 15,    # landscape width
+  base_height= 30,    # landscape height
+  limitsize = F,
+  dpi        = 1000)
+
+utils::browseURL("EAI_Report_Full.pdf")
+```
+
+# Old reminders
+
+-   I am trained, validated, and tested on my ability to predict how PJM
+    West solves prices given the inputted 'state of the grid'.
+
+-   If you believe future states of the grid are misprojected (or have
+    since changed), you should adjust the inputs to best match your
+    expectations.
+
+-   If you want to know how a change in the state of the grid might
+    affect your pricing expectations and positions, you can screenshot
+    the output, adjust the inputs, re-run, and compare.

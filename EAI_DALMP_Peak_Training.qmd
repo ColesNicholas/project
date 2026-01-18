@@ -1,0 +1,273 @@
+---
+title: "EAI | DA-LMP Peak Block | Train Models"
+author: "Nicholas A. Coles and Eric S. Van Westering"
+format: html
+editor_options: 
+  chunk_output_type: console
+---
+
+IF MY PROGRESS BAR IS STILL RUNNING BELOW: LEAVE ME ALONE I'M TRAINING!
+
+# Compile environment
+```{r}
+############################
+# load libraries
+############################
+# time series autoML
+library(h2o)
+library(iForecast)
+library(zoo)
+library(slider)
+
+# data processing
+library(tidyverse)
+library(readxl) 
+library(janitor)
+library(cowplot)
+library(gridExtra)
+library(readr)
+
+# time series autoML
+library(h2o)
+library(iForecast)
+library(zoo)
+library(slider)
+
+# data processing
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(cowplot)
+library(gridExtra)
+
+############################
+# idiosyncratic settings
+############################
+theme_set(theme_classic())
+options(scipen = 999)
+set.seed(1967)
+Sys.setenv(TZ = "America/New_York")
+
+############################
+# specify where we would like predictions to begin
+############################
+target <- Sys.Date()
+```
+
+# Load and process data
+```{r}
+############################
+# open and process data
+############################
+df_lag <- 
+  
+  # open
+  read_xls('eia.input.plus.xls') %>% 
+  
+  # clean variable names and structures
+  clean_names() %>% 
+  mutate(date_time = as.Date(date_time)) %>% 
+  
+  # add some variable suggestions from human Eric
+  mutate(al.go =  
+           rto_combined_bidclose_load_forecast_average / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         ml.go = rto_combined_bidclose_load_forecast_maximum / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         anl.go = rto_combined_net_load_forecast_bid_close_average / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         mnl.go = rto_combined_net_load_forecast_bid_close_maximum / rto_combined_reg_total_gen_offline_capacity_average_latest,
+         # dclm.al = a_b_c_a_bge_bidclose_load_forecast_b_pepco_bidclose_load_forecast_c_dominion_bidclose_load_forecast_maximum / rto_combined_bidclose_load_forecast_average,
+         malm.ml = mid_atlantic_region_bidclose_load_forecast_maximum / rto_combined_bidclose_load_forecast_maximum
+         ) %>% 
+  # create squared load predictor (at request of human Nick)
+  mutate(load_sqr = rto_combined_bidclose_load_forecast_average ^ 2)
+
+############################
+# prepare function for adding 1, 2, 7-day lags of y and all exogenous vars
+############################
+lags <- c(1, 2, 7)
+
+add_lags <- 
+  function(data, 
+           target, 
+           exog, 
+           lags) {
+    
+    out <- data
+    
+    # y lags
+    for (L in lags) {
+      out[[paste0(target, "_lag_", L)]] <- lag(out[[target]], L)
+    }
+    
+    # exogenous lags
+    for (col in exog) {
+      for (L in lags) {
+        out[[paste0(col, "_lag_", L)]] <- dplyr::lag(out[[col]], L)
+      }
+    }
+    out
+  }
+  
+df_lag <-
+  # add lags
+  add_lags(data = df_lag, 
+           target = "western_hub_dalmp_average", 
+           exog = setdiff(colnames(df_lag), 
+                          c("date_time", 
+                            "western_hub_dalmp_average",
+                            "aep_dayton_hub_dalmp_average",
+                            "n_illinois_hub_dalmp_average",
+                            "dominion_hub_dalmp_average",
+                            "eastern_hub_dalmp_average")), 
+           lags = lags)
+
+rm(lags, add_lags)
+
+############################
+# re-compile H20
+############################
+# Define length of test window (currently using k-fold for validation)
+test_days  <- 50L
+test_start  <- max(df_lag$date_time) - days(test_days)
+
+# create splits (time-based)
+trainvalid_df <- df_lag %>% filter(date_time <= test_start)
+test_df  <- df_lag %>% filter(date_time > test_start)
+
+trainvalid_df$date_time %>% min() 
+trainvalid_df$date_time %>% max()
+
+test_df$date_time %>% min()
+test_df$date_time %>% max()
+
+# Move to H2O
+h2o.init()
+
+trainvalid_h2o <- as.h2o(trainvalid_df)
+test_h2o  <- as.h2o(test_df)
+```
+
+# Specify inputs and outcome
+```{r}
+############################
+# specify inputs and outcome
+############################
+x <- setdiff(names(trainvalid_df), 
+             c("date_time", "western_hub_dalmp_average",
+               "aep_dayton_hub_dalmp_average", "n_illinois_hub_dalmp_average",
+               "dominion_hub_dalmp_average", "eastern_hub_dalmp_average"))
+
+y <- "western_hub_dalmp_average"
+```
+
+# Train and export models
+
+Optional: automl
+```{r eval = F}
+automl <-
+  h2o.automl(
+    x = x, 
+    y = y,
+    training_frame = trainvalid_h2o)
+
+h2o.saveModel(
+  object = automl,
+  path = "models/",
+  filename = m,
+  force = T)
+
+```
+
+```{r}
+# specify and name targeted quantiles
+q.val.vec <-
+  setNames(
+    # quantiles
+    c(0.005, 0.025, 0.075, 0.125, 
+      0.175, 0.225, 0.275, 0.325,
+      0.375, 0.425,
+      0.5,
+      0.575, 0.625,
+      0.675, 0.725, 0.775, 0.825,
+      0.875, 0.925, 0.975, 0.995),
+    
+    # names
+    c('dl_99_lo', 'dl_95_lo', 'dl_85_lo', 'dl_75_lo',
+      'dl_65_lo', 'dl_55_lo', 'dl_45_lo', 'dl_35_lo',
+      'dl_25_lo', 'dl_15_lo',
+      'dl_50',
+      'dl_15_hi', 'dl_25_hi',
+      'dl_35_hi', 'dl_45_hi', 'dl_55_hi', 'dl_65_hi',
+      'dl_75_hi', 'dl_85_hi', 'dl_95_hi', 'dl_99_hi')
+    )
+
+# build quantile models
+models <-
+  lapply(
+    q.val.vec, 
+    function(q.val){
+    
+      # fit deep learning model
+      m <- 
+        h2o.deeplearning(
+          x = x, 
+          y = y,
+          training_frame = trainvalid_h2o,
+          nfolds = 5,
+          fold_assignment = "Modulo",
+          overwrite_with_best_model = F,
+          activation  = "RectifierWithDropout",
+          hidden = 50,
+          epochs = 7232.229,
+          seed = 1290607680847814765,
+          epsilon = 0.000000001,
+          input_dropout_ratio = 0.1,
+          hidden_dropout_ratios = 0.4,
+          stopping_rounds = 0,
+          stopping_metric = "deviance",
+          stopping_tolerance = 0.03809697,
+          max_runtime_secs = 714.006,
+          categorical_encoding = "OneHotInternal",
+          distribution = "quantile",
+          quantile_alpha = q.val # key parameter being changed
+          )
+      
+      return(m)
+    }
+    )
+
+# build point prediction model
+models$dl_point <-
+  h2o.deeplearning(
+    x = x, y = y,
+    training_frame = trainvalid_h2o,
+    nfolds = 5,
+    fold_assignment = "Modulo",
+    overwrite_with_best_model = F,
+    activation = "RectifierWithDropout",
+    hidden = 50,
+    epochs = 7232.229,
+    seed = 1290607680847814765,
+    epsilon = 0.000000001,
+    input_dropout_ratio = 0.1,
+    hidden_dropout_ratios = 0.4,
+    stopping_rounds = 0,
+    stopping_metric = "deviance",
+    stopping_tolerance = 0.03809697,
+    max_runtime_secs = 714.006,
+    categorical_encoding = "OneHotInternal"
+    )
+
+# export
+lapply(models %>% 
+         names(),
+       function(m){
+         
+         # export model
+         h2o.saveModel(
+           object = models[[m]],
+           path = "models/",
+           filename = m,
+           force = T)
+         }
+       )
+```
