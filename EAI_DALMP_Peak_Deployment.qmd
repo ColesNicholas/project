@@ -9,7 +9,7 @@ editor:
     wrap: 72
 ---
 
-# hi!
+# hi!!
 
 Your previous weekend sensitivity analyses have been removed, as I have
 helped you extract as much profit as I can.
